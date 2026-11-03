@@ -40,7 +40,12 @@ jobs:
       - name: '设置 Python 环境'
         uses: actions/setup-python@v6
         with:
-          python-version: '3.12.0'
+          # 注意:必须用浮动版本号(如 '3.12'),禁止钉死到补丁号(如 '3.12.0')!
+          # 2026-10-19 起 ubuntu-latest 逐步迁移到 Ubuntu 26.04,新镜像的
+          # python-versions 清单里没有 3.12.0 的预编译包,钉死补丁号会导致
+          # 每次运行都在「设置 Python 环境」一步直接失败(2026-11-02 实测断链约 20 小时)。
+          # 浮动 '3.12' 会在任何镜像上自动解析到最新的 3.12.x(26.04 上为 3.12.16)。
+          python-version: '3.12'
       - name: '安装依赖项'
         run: pip install requests
       - name: '配置 Git 提交身份'

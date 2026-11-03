@@ -3,7 +3,7 @@
 Zepp Life(原小米运动)微信步数自动化 · 分时段累加模式
 ====================================================
 
-功能说明(三阶段权重降档版)
+功能说明(三阶段权重降档版 · v8.1 夜间防风暴)
 --------
 每天从早上 6 点(北京时间)开始自动提交步数:
   - 每天开始时先按 DAILY_PHASES 的权重独立抽「今日阶段」:轻松日/常规日/活跃日,
@@ -958,28 +958,16 @@ def dispatch_next_run():
     print("错误:接力触发最终失败,后续依赖 cron 时间窗兜底唤醒")
 
 
-def _daemon_can_exit():
-    """当日所有账号任务完成(含 22:30 硬截止后放弃剩余),且已过硬截止点(22:30)
-    时允许提前退出,由接力链触发下一班接管夜间空闲时段"""
-    now = datetime.now(BJ_TZ)
-    if now < day_deadline(now):
-        return False
-    state = load_state()
-    today = now.strftime("%F")
-    accounts_state = state.get("accounts", {})
-    keys = [account_key(acc) for acc, _, _ in AccountGroup]
-    if not keys:
-        return False
-    return all(
-        accounts_state.get(k, {}).get("date") == today
-        and accounts_state[k].get("done")
-        for k in keys
-    )
+# (v8.1 起)已移除“当日任务完成后提前收尾”的判断逻辑:原先当日完成后退出并
+# 立刻接力,接班的班次会发现“无事可做”而再次秒退秒接力,形成每 20 秒一次
+# 的夜间触发风暴(实测发生在 22:46~23:59,单晚刷出上百条运行记录);
+# 现在班次一律长驻到时长上限再由接力链交班。夜间本就零提交,空转无副作用。
 
 
 def run_daemon(max_minutes=None, tick_minutes=None):
     """长驻模式:进程内每 tick_minutes 分钟做一次自检,连续运行直到达到最长时长,
-    或当日任务全部完成且超过当天截止点(自动收尾)。
+    到限后由接力链触发下一班(即使当日任务已完成也不提前退出,
+    避免接班班次“秒退秒接力”形成夜间触发风暴,详见下方说明)。
     用于应对 GitHub Actions 对 scheduled 触发的大幅延迟/跳过:
     每天只需 4 个大致准点的触发窗口,窗口内到点提交、错过则自动补交。"""
     max_minutes = int(max_minutes or DAEMON_MAX_MINUTES)
@@ -1001,9 +989,9 @@ def run_daemon(max_minutes=None, tick_minutes=None):
         if time.time() >= deadline:
             print("信息:已达本次长驻运行时长上限,正常退出(下一个时间窗会继续接管)")
             break
-        if _daemon_can_exit():
-            print("信息:今日任务已全部完成且超过当天截止点,长驻模式提前收尾")
-            break
+        # 注:即使当日任务已完成也不提前退出(v8.1 移除旧 _daemon_can_exit 判断):
+        # 此刻退出并立刻接力,接班班次会“秒退秒接力”形成夜间触发风暴;
+        # 就地空转到本班时长上限再交班,夜间零提交,空转无副作用。
 
         remain = started + tick_minutes * 60 - time.time()
         if remain > 0:

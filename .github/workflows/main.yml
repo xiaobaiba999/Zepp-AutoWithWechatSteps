@@ -2,23 +2,37 @@
 #
 # 为什么不靠 GitHub 的定时(schedule)触发?
 #   实测 GitHub 会对 scheduled 触发大幅延迟甚至整批丢弃(*/20 一天实际只触发
-#   几次;改 4 个时间窗后也曾整班不来),预约好的提交时间无人唤醒、步数远少于
+#   几次;改固定时间窗后也曾整班不来),预约好的提交时间无人唤醒、步数远少于
 #   预期。因此采用「接力链」:每一班进程连续长驻约 5.5 小时,退出时通过 GitHub
-#   API 亲自触发下一班(workflow_dispatch 是官方文档明确允许由 GITHUB_TOKEN
-#   触发的事件,准点率远高于 schedule)。链条全天滚动、完全不依赖 cron 的可靠
-#   性;下方 4 个 cron 仅作链条断裂时的兜底,手动 Run workflow 也可随时拉起。
+#   API 亲自触发下一班(workflow_dispatch / repository_dispatch 是官方文档明确
+#   允许由 GITHUB_TOKEN 触发的事件,准点率远高于 schedule)。链条全天滚动、
+#   完全不依赖 cron 的可靠性;手动 Run workflow 也可随时拉起。
 #
-# 班次衔接(北京时间):05:30~11:00 / 11:20~16:50 / 16:50~22:20 / 22:20~23:40,
-# 每班结束自动接力下一班,全天无缝覆盖;即使某班被 GitHub 丢弃也不影响后续。
+# v8.2 双通道接力:main.py 先走 workflow_dispatch,连续被拒时自动改走
+#   repository_dispatch(两个不同的 API 端点,GitHub 只拦其中一条时仍可续链;
+#   2026-11-10 08:17 实测出现过 "repository invocation blocked" 拦截接力
+#   调用导致断链半天,故加此退路)。触发器里的 repository_dispatch 即为该
+#   备用通道预留,请勿删除。
+#
+# v8.2 加密兜底网:下方 cron 由 4 个增至 8 个(约每 3 小时一个),单点 cron
+#   被延迟/丢弃时链条最长断约 3 小时,而不是半天。
+#
+# 班次衔接(北京时间):每班约 5.5 小时,班尾自动接力下一班,全天无缝覆盖;
+#   兜底窗口 05:30 / 08:30 / 11:20 / 13:30 / 16:50 / 19:00 / 22:20 / 23:50。
 name: 自动任务-修改Zepp当天运动数据
 
 on:
   workflow_dispatch:
+  repository_dispatch:        # v8.2:接力链备用通道(workflow_dispatch 被拦时由 main.py 自动改走这里)
   schedule:
     - cron: '30 21 * * *'   # 兜底:北京时间 05:30
+    - cron: '30 0 * * *'    # 兜底:北京时间 08:30(v8.2 新增)
     - cron: '20 3 * * *'    # 兜底:北京时间 11:20
+    - cron: '30 5 * * *'    # 兜底:北京时间 13:30(v8.2 新增)
     - cron: '50 8 * * *'    # 兜底:北京时间 16:50
+    - cron: '0 11 * * *'    # 兜底:北京时间 19:00(v8.2 新增)
     - cron: '20 14 * * *'   # 兜底:北京时间 22:20
+    - cron: '50 15 * * *'   # 兜底:北京时间 23:50(v8.2 新增)
 
 concurrency:
   group: zepp-steps-update   # 同一时刻只允许一个实例,避免状态竞争
@@ -52,6 +66,10 @@ jobs:
         run: |
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          # v8.2:git 网络挂起保护(实测 2026-11-09 有班次因网络操作挂起拖满
+          # 350 分钟被 GitHub 超时击杀、未及接力下一班,链条断档数小时):
+          git config --global http.lowSpeedLimit 2000
+          git config --global http.lowSpeedTime 60
       - name: '运行主程序(长驻班次:接力/定时/手动触发一视同仁)'
         env:
           ACCOUNT: ${{ secrets.ACCOUNT }}

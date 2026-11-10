@@ -3,7 +3,7 @@
 Zepp Life(原小米运动)微信步数自动化 · 分时段累加模式
 ====================================================
 
-功能说明(三阶段权重降档版 · v8.1 夜间防风暴)
+功能说明(三阶段权重降档版 · v8.2 防挂起·接力双通道)
 --------
 每天从早上 6 点(北京时间)开始自动提交步数:
   - 每天开始时先按 DAILY_PHASES 的权重独立抽「今日阶段」:轻松日/常规日/活跃日,
@@ -51,6 +51,19 @@ GitHub Actions 有两个限制:
      夜间班次仅维持接力链运转,次日 6 点自动开始新一轮。
 每天次数按「工作日/休息日」自动区分:优先调用免费节假日接口识别法定节假日
 与调休补班(可关闭),接口失败时回退为「周一至周五=工作日、周六日=休息日」。
+
+v8.2 相对 v8.1 的变化(步数行为零变化,仅修链路与防挂起)
+--------
+1. 网络请求全部加超时:登录两步/取 app_token/提交步数原本无超时,实测
+   2026-11-09 有班次因请求挂起拖满 350 分钟被 GitHub 超时击杀、来不及接力,
+   链条断档 20 分钟;现全部强制 20 秒超时(另加 socket 全局 30 秒兜底)。
+2. 接力双通道:workflow_dispatch 被 GitHub 拦截时(2026-11-10 08:17 实测出现过
+   "repository invocation blocked" 导致断链半天),自动改走 repository_dispatch
+   备用通道再试;main.yml 已同步增加 repository_dispatch 触发器。
+3. 接力诊断落地:每次接力结果写入 state.json 顶层 diag 字段(公开可读),
+   今后不用登录看 Actions 日志也能远程判断接力是否被拦、断链原因是什么。
+4. 配合 main.yml 把兜底 cron 从 4 个加密到 8 个(约每 3 小时一个),
+   cron 单点被延迟/丢弃时链条最长只断约 3 小时而不是半天。
 """
 
 import requests
@@ -66,6 +79,11 @@ import hashlib
 import subprocess
 import urllib.parse
 from datetime import datetime, timedelta, timezone
+
+# 网络操作全局兜底超时(v8.2):任何未显式设超时的 socket/requests 操作最多 30 秒,
+# 防止单个请求挂起拖死整班长驻进程(实测 2026-11-09 02:52 班次因挂起拖满 350 分钟
+# 被 GitHub 超时击杀、未及接力下一班,链条断档至下一 cron 窗口才被唤醒)。
+socket.setdefaulttimeout(30)
 
 # ====================== 全局默认配置(可按需修改) ======================
 
@@ -166,7 +184,7 @@ def login(account, password):
     }
     url1 = "https://api-user.huami.com/registrations/" + account + "/tokens"
     data1 = f"client_id=HuaMi&country_code=CN&json_response=true&name={account}&password={password}&redirect_uri=https://s3-us-west-2.amazonaws.com/hm-registration/successsignin.html&state=REDIRECTION&token=access"
-    res1 = requests.post(url1, data=data1, headers=headers)
+    res1 = requests.post(url1, data=data1, headers=headers, timeout=20)  # v8.2:加超时防挂起
 
     if res1.status_code == 200:
         r1sc = res1.status_code
@@ -186,7 +204,7 @@ def login(account, password):
 
     url2 = "https://account.huami.com/v2/client/login"
     data2 = f"app_name=com.xiaomi.hm.health&country_code=CN&code={code}&device_id=00:00:00:00:00:00&device_model=android_phone&app_version=6.12.0&grant_type=access_token&allow_registration=false&source=com.xiaomi.hm.health&third_name={third_name}"
-    res2 = requests.post(url2, data=data2, headers=headers)
+    res2 = requests.post(url2, data=data2, headers=headers, timeout=20)  # v8.2:加超时防挂起
 
     res2_body = res2.text
     if res2.status_code == 200:
@@ -211,7 +229,7 @@ def get_app_token(login_token):
         "app_name": "com.xiaomi.hm.health",
     }
     url = f"https://account-cn.huami.com/v1/client/app_tokens?login_token={login_token}"
-    res = requests.get(url, headers=headers)
+    res = requests.get(url, headers=headers, timeout=20)  # v8.2:加超时防挂起
 
     if res.status_code == 200:
         res_data = res.json()
@@ -249,7 +267,7 @@ def change_steps(account, user_id, app_token, steps):
     data0 = f"userid={user_id}&last_sync_data_time={sec_timestamp}&device_type=0&last_deviceid={deviceID}&data_json={dataJSON}"
 
     try:
-        res0 = requests.post(url0, data=data0, headers=headers0)
+        res0 = requests.post(url0, data=data0, headers=headers0, timeout=20)  # v8.2:加超时防挂起
         res0_data = res0.json()
         print(f"信息:账号:{account};步数={steps};返回结果={res0_data}")
         if res0_data.get('message') == 'success':
@@ -927,35 +945,97 @@ def dispatch_next_run():
     使用 Actions 自动注入的 GITHUB_TOKEN(需 workflow 权限 actions:write)。
     workflow_dispatch / repository_dispatch 是 GitHub 文档明确允许由
     GITHUB_TOKEN 触发新运行的两个例外事件,因此无需个人 Token。
-    仅在 GitHub Actions 环境且 SELF_DISPATCH 开启时生效,本地/测试自动跳过。"""
+    v8.2 双通道:workflow_dispatch 重试失败后自动改走 repository_dispatch
+    备用通道(两个不同的 API 端点,GitHub 只拦其中一条时仍可续链;
+    2026-11-10 08:17 实测出现过 "repository invocation blocked" 拦截
+    workflow_dispatch 调用导致断链半天,故加此退路;main.yml 已同步增加
+    repository_dispatch 触发器)。
+    返回诊断 dict:{"ok":True/False/None,"method","code","msg"},由
+    _record_dispatch_diag 写入 state.json 顶层 diag 字段(公开可读)。
+    仅在 GitHub Actions 环境且 SELF_DISPATCH 开启时真正发起,本地/测试自动跳过。"""
     if not SELF_DISPATCH or os.environ.get("DISABLE_SELF_DISPATCH") == "1":
-        return
+        return {"ok": None, "method": "disabled", "code": None,
+                "msg": "SELF_DISPATCH 已关闭或被 DISABLE_SELF_DISPATCH 禁用"}
     if os.environ.get("GITHUB_ACTIONS") != "true":
         print("信息:非 Actions 环境,跳过接力触发")
-        return
+        return {"ok": None, "method": "local", "code": None,
+                "msg": "非 Actions 环境,未发起接力"}
     token = os.environ.get("GITHUB_TOKEN", "")
     repo = os.environ.get("GITHUB_REPOSITORY", "")
     branch = os.environ.get("GITHUB_REF_NAME", "main")
-    if not token or not repo:
-        print("警告:缺少 GITHUB_TOKEN / GITHUB_REPOSITORY,无法接力触发下一班,将由 cron 时间窗兜底")
-        return
-    url = f"https://api.github.com/repos/{repo}/actions/workflows/main.yml/dispatches"
     headers = {
         "Authorization": f"Bearer {token}",
         "Accept": "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
     }
+    if not token or not repo:
+        print("警告:缺少 GITHUB_TOKEN / GITHUB_REPOSITORY,无法接力触发下一班,将由 cron 时间窗兜底")
+        return {"ok": False, "method": "workflow_dispatch", "code": None,
+                "msg": "缺少 GITHUB_TOKEN / GITHUB_REPOSITORY"}
+    url = f"https://api.github.com/repos/{repo}/actions/workflows/main.yml/dispatches"
+    result = {"ok": False, "method": "workflow_dispatch", "code": None, "msg": ""}
     for attempt in range(1, SELF_DISPATCH_MAX_RETRY + 1):
         try:
             res = requests.post(url, json={"ref": branch}, headers=headers, timeout=15)
             if res.status_code == 204:
                 print(f"信息:接力链:已触发下一班长驻(第 {attempt} 次尝试成功),约半分钟内接管")
-                return
+                result["ok"] = True
+                result["code"] = 204
+                result["msg"] = f"workflow_dispatch 第 {attempt} 次尝试成功"
+                return result
+            result["code"] = res.status_code
+            result["msg"] = f"HTTP {res.status_code}:{res.text[:120]}"
             print(f"警告:接力触发返回 HTTP {res.status_code}:{res.text[:200]}({attempt}/{SELF_DISPATCH_MAX_RETRY})")
         except Exception as e:
+            result["msg"] = f"异常:{e}"
             print(f"警告:接力触发异常:{e}({attempt}/{SELF_DISPATCH_MAX_RETRY})")
         time.sleep(SELF_DISPATCH_RETRY_SLEEP)
-    print("错误:接力触发最终失败,后续依赖 cron 时间窗兜底唤醒")
+    # v8.2 备用通道:workflow_dispatch 全部失败,改走 repository_dispatch 再试
+    try:
+        url2 = f"https://api.github.com/repos/{repo}/dispatches"
+        res2 = requests.post(url2, json={"event_type": "zepp-relay"}, headers=headers, timeout=15)
+        result["method"] = "repository_dispatch"
+        result["code"] = res2.status_code
+        if res2.status_code == 204:
+            print("信息:接力链:workflow_dispatch 通道被拒,已改走 repository_dispatch 备用通道并成功")
+            result["ok"] = True
+            result["msg"] = f"workflow_dispatch 连败 {SELF_DISPATCH_MAX_RETRY} 次后 repository_dispatch 成功"
+            return result
+        result["msg"] = (f"workflow_dispatch 失败后 repository_dispatch 也失败:"
+                         f"HTTP {res2.status_code}:{res2.text[:120]}")
+        print(f"警告:repository_dispatch 备用通道也失败:HTTP {res2.status_code}:{res2.text[:200]}")
+    except Exception as e:
+        result["method"] = "repository_dispatch"
+        result["msg"] = f"repository_dispatch 异常:{e}"
+        print(f"警告:repository_dispatch 备用通道异常:{e}")
+    print("错误:接力触发最终失败,后续依赖加密后的 cron 兜底网(v8.2 已增至 8 个时间窗)唤醒")
+    return result
+
+
+def _record_dispatch_diag(result):
+    """v8.2:把最后一次接力触发的结果写入 state.json 顶层 diag 字段并推回仓库。
+    Actions 运行日志需要登录才能看,而 state.json 是公开仓库里可直接读的——
+    接力一旦再被 GitHub 拦截(如 2026-11-10 的 "repository invocation blocked"),
+    不登录日志页也能从仓库直接判断断链原因、被拒的是哪条通道。
+    仅在 Actions 环境记录;写入失败不影响主流程(仅丢诊断信息)。"""
+    if os.environ.get("GITHUB_ACTIONS") != "true":
+        return
+    if not isinstance(result, dict):
+        return
+    try:
+        state = load_state()
+        now = datetime.now(BJ_TZ)
+        state["diag"] = {
+            "ts": now.strftime("%Y-%m-%d %H:%M:%S"),
+            "ok": bool(result.get("ok")),
+            "method": str(result.get("method", ""))[:60],
+            "code": result.get("code"),
+            "msg": str(result.get("msg", ""))[:200],
+        }
+        save_state(state)
+        push_state_if_changed()
+    except Exception as e:
+        print(f"警告:写入接力诊断信息失败:{e}")
 
 
 # (v8.1 起)已移除“当日任务完成后提前收尾”的判断逻辑:原先当日完成后退出并
@@ -969,11 +1049,13 @@ def run_daemon(max_minutes=None, tick_minutes=None):
     到限后由接力链触发下一班(即使当日任务已完成也不提前退出,
     避免接班班次“秒退秒接力”形成夜间触发风暴,详见下方说明)。
     用于应对 GitHub Actions 对 scheduled 触发的大幅延迟/跳过:
-    每天只需 4 个大致准点的触发窗口,窗口内到点提交、错过则自动补交。"""
+    主力靠接力链交班,另每天有 8 个大致准点的 cron 兜底窗口(v8.2 由 4 个加密),
+    窗口内到点提交、错过则自动补交。"""
     max_minutes = int(max_minutes or DAEMON_MAX_MINUTES)
     tick_minutes = int(tick_minutes or WAKE_TICK_MINUTES)
     evt = os.environ.get("GITHUB_EVENT_NAME", "")
-    src_name = {"workflow_dispatch": "接力链触发", "schedule": "cron 定时兜底"}.get(
+    src_name = {"workflow_dispatch": "接力链触发", "schedule": "cron 定时兜底",
+                "repository_dispatch": "接力链备用通道"}.get(
         evt, f"本地/手动({evt or '无事件标识'})")
     print(f"===== 进入长驻模式(触发来源:{src_name}):每 {tick_minutes} 分钟自检一次,最长运行 {max_minutes} 分钟 =====")
     deadline = time.time() + max_minutes * 60
@@ -997,8 +1079,10 @@ def run_daemon(max_minutes=None, tick_minutes=None):
         if remain > 0:
             time.sleep(remain)
 
-    # 无论因时长到限还是任务完成收尾,都接力触发下一班,保持链条不断
-    dispatch_next_run()
+    # 无论因时长到限还是任务完成收尾,都接力触发下一班,保持链条不断;
+    # v8.2:把接力结果写入 state.json 的 diag 字段(公开可读),便于远程诊断断链原因
+    dispatch_result = dispatch_next_run()
+    _record_dispatch_diag(dispatch_result)
     print("===== 长驻模式结束 =====")
 
 

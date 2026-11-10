@@ -33,5 +33,12 @@
       "rest": false,
       "source": "按星期回退"
     }
+  },
+  "diag": {
+    "ts": "2026-11-10 20:57:46",
+    "ok": true,
+    "method": "workflow_dispatch",
+    "code": 204,
+    "msg": "workflow_dispatch 第 1 次尝试成功"
   }
 }

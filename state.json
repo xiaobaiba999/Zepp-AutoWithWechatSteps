@@ -35,7 +35,11 @@
     }
   },
   "diag": {
+<<<<<<< HEAD
     "ts": "2026-11-13 00:00:15",
+=======
+    "ts": "2026-11-13 05:40:29",
+>>>>>>> e44f0d8 (chore: 更新步数任务状态 [skip ci])
     "ok": true,
     "method": "workflow_dispatch",
     "code": 204,

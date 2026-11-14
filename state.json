@@ -2,30 +2,30 @@
   "version": 1,
   "accounts": {
     "322a89455926db15": {
-      "date": "2026-11-14",
-      "run_count": 10,
-      "total_steps": 12065,
+      "date": "2026-11-15",
+      "run_count": 0,
+      "total_steps": 0,
       "next_run_ts": 0,
       "fail_count": 0,
-      "done": true,
-      "target": 12065,
-      "phase": 0,
+      "done": false,
+      "target": 26033,
+      "phase": 2,
       "plan": [
-        1317,
-        1328,
-        1154,
-        1147,
-        1189,
-        1238,
-        1154,
-        1273,
-        1163,
-        1102
+        2463,
+        3289,
+        2708,
+        2449,
+        2489,
+        2981,
+        2257,
+        2666,
+        2565,
+        2166
       ]
     }
   },
   "workday_cache": {
-    "2026-11-14": {
+    "2026-11-15": {
       "rest": true,
       "source": "按星期回退"
     }

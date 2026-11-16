@@ -3,11 +3,11 @@
   "accounts": {
     "322a89455926db15": {
       "date": "2026-11-16",
-      "run_count": 13,
-      "total_steps": 13953,
-      "next_run_ts": 1794836920.3029,
+      "run_count": 14,
+      "total_steps": 14615,
+      "next_run_ts": 0,
       "fail_count": 0,
-      "done": false,
+      "done": true,
       "target": 14615,
       "phase": 0,
       "plan": [
